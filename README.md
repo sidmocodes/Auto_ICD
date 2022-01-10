@@ -2,8 +2,6 @@
 # Auto ICD
 > Automated coding of diseases
 
-#### https://icd-10-ai.herokuapp.com/
-
 This is a web app that tries its best to automatically assign codes to any disease or disability according to the **international standard for coding and reporting diseases** (ICD-10 2020).
 
 ## Development setup
