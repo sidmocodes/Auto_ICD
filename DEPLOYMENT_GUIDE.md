@@ -299,7 +299,6 @@ Potential improvements:
 - **Author**: Siddharth Mohanty
 - **Email**: siddharthmohantywk@gmail.com
 - **GitHub**: @sidmocodes
-- **Original Project**: Auto ICD (2019)
 
 ## License
 
