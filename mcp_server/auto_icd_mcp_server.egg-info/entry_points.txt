@@ -1,0 +1,2 @@
+[console_scripts]
+auto-icd-mcp = auto_icd_mcp.server:main
