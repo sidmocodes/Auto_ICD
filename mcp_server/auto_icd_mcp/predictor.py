@@ -11,6 +11,14 @@ from pathlib import Path
 # Configure logging
 logger = logging.getLogger(__name__)
 
+# Try to import ML model for enhanced predictions
+try:
+    from .ml_model import ICDMLModel, MLModelError
+    ML_MODEL_AVAILABLE = True
+except ImportError:
+    ML_MODEL_AVAILABLE = False
+    logger.info("ML model not available, using rule-based predictions only")
+
 
 class PatientValidationError(ValueError):
     """Custom exception for patient data validation errors."""
@@ -184,6 +192,11 @@ class PatientDetails:
             return "Stage 1 Hypertension"
         else:
             return "Stage 2 Hypertension"
+    
+    @property
+    def specialty(self) -> Optional[str]:
+        """Alias for doctor_specialty for convenience."""
+        return self.doctor_specialty
 
 
 @dataclass
@@ -211,13 +224,17 @@ class ICDPrediction:
 
 
 class EnhancedICDPredictor:
-    """Enhanced ICD-10 predictor with comprehensive patient analysis."""
+    """Enhanced ICD-10 predictor with comprehensive patient analysis.
     
-    def __init__(self, data_dir: str = None):
+    Uses ML-based TF-IDF model when available, falling back to rule-based matching.
+    """
+    
+    def __init__(self, data_dir: str = None, use_ml: bool = True):
         """Initialize predictor with data files.
         
         Args:
             data_dir: Directory containing icd_list.json and counts.pickle
+            use_ml: Whether to use ML model for enhanced predictions (default: True)
             
         Raises:
             PredictorDataError: If required data files cannot be loaded
@@ -226,12 +243,25 @@ class EnhancedICDPredictor:
             data_dir = str(Path(__file__).parent.parent.parent)
         
         self.data_dir = Path(data_dir)
+        self.use_ml = use_ml and ML_MODEL_AVAILABLE
+        self.ml_model: Optional[ICDMLModel] = None
+        
         logger.info(f"Initializing EnhancedICDPredictor with data_dir: {self.data_dir}")
         
         try:
             self.icd_list = self._load_icd_list()
             self.counts = self._load_counts()
             logger.info(f"Predictor initialized with {len(self.icd_list)} ICD codes")
+            
+            # Initialize ML model if enabled
+            if self.use_ml:
+                try:
+                    self.ml_model = ICDMLModel(data_dir=str(self.data_dir))
+                    logger.info("ML model initialized successfully")
+                except Exception as e:
+                    logger.warning(f"Failed to initialize ML model, falling back to rule-based: {e}")
+                    self.ml_model = None
+                    self.use_ml = False
         except Exception as e:
             logger.error(f"Failed to initialize predictor: {e}")
             raise PredictorDataError(f"Failed to initialize predictor: {e}")
@@ -436,6 +466,9 @@ class EnhancedICDPredictor:
         """
         Predict ICD codes for patient with comprehensive analysis.
         
+        Uses ML-based TF-IDF model when available for enhanced accuracy,
+        falling back to rule-based matching otherwise.
+        
         Args:
             patient: Patient details
             top_n: Number of top predictions to return (1-100)
@@ -461,6 +494,107 @@ class EnhancedICDPredictor:
         logger.info(f"Predicting ICD codes for patient (age={patient.age}, sex={patient.sex}, symptoms={len(patient.symptoms)})")
         
         all_symptoms = patient.symptoms + patient.primary_complaints
+        
+        # Use ML model if available for better predictions
+        if self.ml_model is not None and all_symptoms:
+            return self._predict_ml(patient, all_symptoms, top_n)
+        
+        # Fall back to rule-based prediction
+        return self._predict_rule_based(patient, all_symptoms, top_n)
+    
+    def _predict_ml(self, patient: PatientDetails, all_symptoms: List[str], top_n: int) -> List[ICDPrediction]:
+        """Use ML model for predictions.
+        
+        Args:
+            patient: Patient details
+            all_symptoms: Combined symptoms and complaints
+            top_n: Number of predictions to return
+            
+        Returns:
+            List of ICDPrediction objects
+        """
+        logger.info("Using ML model for predictions")
+        
+        # Prepare vitals dictionary
+        vitals = {}
+        if patient.bmi:
+            vitals['bmi'] = patient.bmi
+            vitals['bmi_category'] = patient.bmi_category
+        if patient.systolic_bp:
+            vitals['systolic_bp'] = patient.systolic_bp
+            vitals['diastolic_bp'] = patient.diastolic_bp
+            vitals['bp_category'] = patient.bp_category
+        if patient.temperature_c:
+            vitals['temperature'] = patient.temperature_c
+        if patient.heart_rate:
+            vitals['heart_rate'] = patient.heart_rate
+        if patient.respiratory_rate:
+            vitals['respiratory_rate'] = patient.respiratory_rate
+        
+        # Get ML predictions
+        ml_predictions = self.ml_model.predict(
+            symptoms=all_symptoms,
+            age=patient.age,
+            sex=patient.sex,
+            specialty=patient.specialty,
+            vitals=vitals,
+            top_n=top_n
+        )
+        
+        # Convert to ICDPrediction objects
+        predictions = []
+        for ml_pred in ml_predictions:
+            # Get vitals relevance using our method
+            vitals_relevance = self._analyze_vitals_relevance(patient, ml_pred['description'])
+            
+            # Get matched symptoms
+            matched_symptoms = ml_pred.get('matched_symptoms', [])
+            
+            # Get scores from nested structure
+            scores = ml_pred.get('scores', {})
+            tfidf_score = scores.get('tfidf_similarity', 0.0)
+            historical_score = scores.get('historical_probability', 0.0)
+            vitals_boost = scores.get('vitals_relevance', 0.0)
+            
+            # Use ML-generated explanation as base
+            explanation = ml_pred.get('matching_explanation', '')
+            
+            # Add ML scoring info to explanation
+            ml_explanation = f" [ML Score: TF-IDF={tfidf_score:.3f}"
+            if historical_score > 0:
+                ml_explanation += f", Historical={historical_score:.3f}"
+            if vitals_boost > 0:
+                ml_explanation += f", Vitals={vitals_boost:.3f}"
+            ml_explanation += "]"
+            explanation += ml_explanation
+            
+            # Merge vitals from ML model and local analysis
+            merged_vitals = {**ml_pred.get('related_vitals', {}), **vitals_relevance}
+            
+            predictions.append(ICDPrediction(
+                code=ml_pred['code'],
+                description=ml_pred['description'],
+                probability_score=ml_pred['probability_score'],
+                matched_symptoms=matched_symptoms,
+                related_vitals=merged_vitals,
+                confidence_level=ml_pred['confidence_level'],
+                matching_explanation=explanation
+            ))
+        
+        return predictions
+    
+    def _predict_rule_based(self, patient: PatientDetails, all_symptoms: List[str], top_n: int) -> List[ICDPrediction]:
+        """Use rule-based matching for predictions.
+        
+        Args:
+            patient: Patient details
+            all_symptoms: Combined symptoms and complaints
+            top_n: Number of predictions to return
+            
+        Returns:
+            List of ICDPrediction objects
+        """
+        logger.info("Using rule-based predictions")
         predictions = []
         
         # Search through ICD codes
