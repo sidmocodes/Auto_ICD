@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  # Flask API Service
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: auto-icd-api
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=production
+      - FLASK_APP=app.py
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - auto-icd-network
+
+  # MCP Server Service
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    container_name: auto-icd-mcp
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    networks:
+      - auto-icd-network
+
+networks:
+  auto-icd-network:
+    driver: bridge
