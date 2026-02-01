@@ -131,7 +131,7 @@ python examples.py
 
 ## 📄 License
 
-MIT License - See [LICENSE.md](LICENSE.md)
+GPL-3.0 License - See [LICENSE.md](LICENSE.md)
 
 ## 👨‍💻 Author
 
