@@ -3,9 +3,57 @@
 import json
 import pickle
 import os
+import logging
 from typing import List, Dict, Any, Optional, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+# Configure logging
+logger = logging.getLogger(__name__)
+
+
+class PatientValidationError(ValueError):
+    """Custom exception for patient data validation errors."""
+    pass
+
+
+class PredictorDataError(Exception):
+    """Custom exception for predictor data loading errors."""
+    pass
+
+
+# Validation constants
+VALID_SEX_VALUES = ['M', 'F', 'MALE', 'FEMALE']
+AGE_MIN = 0
+AGE_MAX = 150
+HEIGHT_MIN = 20  # cm (smallest recorded human)
+HEIGHT_MAX = 280  # cm (tallest recorded human)
+WEIGHT_MIN = 0.5  # kg (premature infant)
+WEIGHT_MAX = 700  # kg (heaviest recorded human)
+BP_SYSTOLIC_MIN = 50
+BP_SYSTOLIC_MAX = 300
+BP_DIASTOLIC_MIN = 30
+BP_DIASTOLIC_MAX = 200
+HEART_RATE_MIN = 20
+HEART_RATE_MAX = 300
+TEMPERATURE_MIN = 25.0  # Celsius (severe hypothermia)
+TEMPERATURE_MAX = 45.0  # Celsius (severe hyperthermia)
+RESPIRATORY_RATE_MIN = 5
+RESPIRATORY_RATE_MAX = 60
+
+
+def validate_range(value: Any, min_val: float, max_val: float, field_name: str) -> None:
+    """Validate that a numeric value is within the specified range."""
+    if value is not None:
+        try:
+            num_value = float(value)
+        except (TypeError, ValueError):
+            raise PatientValidationError(f"{field_name} must be a valid number, got {value}")
+        
+        if num_value < min_val or num_value > max_val:
+            raise PatientValidationError(
+                f"{field_name} must be between {min_val} and {max_val}, got {value}"
+            )
 
 
 @dataclass
@@ -20,13 +68,14 @@ class PatientDetails:
     heart_rate: Optional[int] = None
     temperature_c: Optional[float] = None
     respiratory_rate: Optional[int] = None
-    symptoms: List[str] = None
-    primary_complaints: List[str] = None
-    medical_history: List[str] = None
-    comorbidities: List[str] = None
+    symptoms: List[str] = field(default_factory=list)
+    primary_complaints: List[str] = field(default_factory=list)
+    medical_history: List[str] = field(default_factory=list)
+    comorbidities: List[str] = field(default_factory=list)
     doctor_specialty: Optional[str] = None
     
     def __post_init__(self):
+        # Initialize empty lists if None
         if self.symptoms is None:
             self.symptoms = []
         if self.primary_complaints is None:
@@ -36,17 +85,75 @@ class PatientDetails:
         if self.comorbidities is None:
             self.comorbidities = []
         
-        # Normalize sex
-        self.sex = self.sex.upper()
-        if self.sex not in ['M', 'F']:
-            raise ValueError("Sex must be 'M' or 'F'")
+        # Validate and normalize sex
+        if not self.sex:
+            raise PatientValidationError("Sex is required")
+        
+        self.sex = str(self.sex).strip().upper()
+        if self.sex not in VALID_SEX_VALUES:
+            raise PatientValidationError(
+                f"Sex must be one of {VALID_SEX_VALUES}, got '{self.sex}'"
+            )
+        # Normalize to single character
+        self.sex = 'M' if self.sex in ['M', 'MALE'] else 'F'
+        
+        # Validate age
+        validate_range(self.age, AGE_MIN, AGE_MAX, "Age")
+        
+        # Validate vitals if provided
+        validate_range(self.height_cm, HEIGHT_MIN, HEIGHT_MAX, "Height")
+        validate_range(self.weight_kg, WEIGHT_MIN, WEIGHT_MAX, "Weight")
+        validate_range(self.systolic_bp, BP_SYSTOLIC_MIN, BP_SYSTOLIC_MAX, "Systolic BP")
+        validate_range(self.diastolic_bp, BP_DIASTOLIC_MIN, BP_DIASTOLIC_MAX, "Diastolic BP")
+        validate_range(self.heart_rate, HEART_RATE_MIN, HEART_RATE_MAX, "Heart rate")
+        validate_range(self.temperature_c, TEMPERATURE_MIN, TEMPERATURE_MAX, "Temperature")
+        validate_range(self.respiratory_rate, RESPIRATORY_RATE_MIN, RESPIRATORY_RATE_MAX, "Respiratory rate")
+        
+        # Validate BP consistency
+        if self.systolic_bp is not None and self.diastolic_bp is not None:
+            if self.diastolic_bp >= self.systolic_bp:
+                raise PatientValidationError(
+                    f"Diastolic BP ({self.diastolic_bp}) must be less than systolic BP ({self.systolic_bp})"
+                )
+        
+        # Sanitize string lists
+        self.symptoms = self._sanitize_string_list(self.symptoms, "symptoms")
+        self.primary_complaints = self._sanitize_string_list(self.primary_complaints, "primary_complaints")
+        self.medical_history = self._sanitize_string_list(self.medical_history, "medical_history")
+        self.comorbidities = self._sanitize_string_list(self.comorbidities, "comorbidities")
+        
+        logger.debug(f"Created PatientDetails: age={self.age}, sex={self.sex}, symptoms={len(self.symptoms)}")
+    
+    def _sanitize_string_list(self, items: List[str], field_name: str) -> List[str]:
+        """Sanitize a list of strings by stripping whitespace and removing empty items."""
+        if not isinstance(items, list):
+            raise PatientValidationError(f"{field_name} must be a list")
+        
+        sanitized = []
+        for item in items:
+            if isinstance(item, str):
+                cleaned = item.strip()
+                if cleaned:  # Only add non-empty strings
+                    sanitized.append(cleaned)
+            else:
+                logger.warning(f"Skipping non-string item in {field_name}: {item}")
+        
+        return sanitized
     
     @property
     def bmi(self) -> Optional[float]:
         """Calculate BMI if height and weight are available."""
         if self.height_cm and self.weight_kg:
-            height_m = self.height_cm / 100
-            return round(self.weight_kg / (height_m ** 2), 2)
+            try:
+                if self.height_cm <= 0:
+                    logger.warning("Cannot calculate BMI: height is zero or negative")
+                    return None
+                height_m = self.height_cm / 100
+                bmi_value = self.weight_kg / (height_m ** 2)
+                return round(bmi_value, 2)
+            except (ZeroDivisionError, TypeError) as e:
+                logger.warning(f"Failed to calculate BMI: {e}")
+                return None
         return None
     
     @property
@@ -107,42 +214,115 @@ class EnhancedICDPredictor:
     """Enhanced ICD-10 predictor with comprehensive patient analysis."""
     
     def __init__(self, data_dir: str = None):
-        """Initialize predictor with data files."""
+        """Initialize predictor with data files.
+        
+        Args:
+            data_dir: Directory containing icd_list.json and counts.pickle
+            
+        Raises:
+            PredictorDataError: If required data files cannot be loaded
+        """
         if data_dir is None:
             data_dir = str(Path(__file__).parent.parent.parent)
         
         self.data_dir = Path(data_dir)
-        self.icd_list = self._load_icd_list()
-        self.counts = self._load_counts()
+        logger.info(f"Initializing EnhancedICDPredictor with data_dir: {self.data_dir}")
+        
+        try:
+            self.icd_list = self._load_icd_list()
+            self.counts = self._load_counts()
+            logger.info(f"Predictor initialized with {len(self.icd_list)} ICD codes")
+        except Exception as e:
+            logger.error(f"Failed to initialize predictor: {e}")
+            raise PredictorDataError(f"Failed to initialize predictor: {e}")
         
     def _load_icd_list(self) -> List[Dict[str, str]]:
-        """Load and parse ICD-10 code list."""
-        icd_file = self.data_dir / 'icd_list.json'
-        if not icd_file.exists():
-            raise FileNotFoundError(f"ICD list not found at {icd_file}")
+        """Load and parse ICD-10 code list.
         
-        with open(icd_file, 'r') as f:
-            raw_list = json.load(f)
+        Returns:
+            List of dictionaries with 'description' and 'code' keys
+            
+        Raises:
+            PredictorDataError: If file cannot be loaded or parsed
+        """
+        icd_file = self.data_dir / 'icd_list.json'
+        
+        if not icd_file.exists():
+            raise PredictorDataError(f"ICD list not found at {icd_file}")
+        
+        try:
+            with open(icd_file, 'r', encoding='utf-8') as f:
+                raw_list = json.load(f)
+        except json.JSONDecodeError as e:
+            raise PredictorDataError(f"Invalid JSON in ICD list file: {e}")
+        except IOError as e:
+            raise PredictorDataError(f"Failed to read ICD list file: {e}")
+        
+        if not isinstance(raw_list, list):
+            raise PredictorDataError("ICD list file must contain a JSON array")
         
         parsed_list = []
-        for entry in raw_list:
-            if ':' in entry:
-                desc, code = entry.split(':', 1)
-                parsed_list.append({
-                    'description': desc.strip().lower(),
-                    'code': code.strip()
-                })
+        parse_errors = 0
         
+        for i, entry in enumerate(raw_list):
+            if not isinstance(entry, str):
+                logger.warning(f"Skipping non-string entry at index {i}: {type(entry)}")
+                parse_errors += 1
+                continue
+                
+            if ':' not in entry:
+                logger.warning(f"Skipping entry without colon separator at index {i}: {entry[:50]}...")
+                parse_errors += 1
+                continue
+            
+            try:
+                desc, code = entry.split(':', 1)
+                desc = desc.strip().lower()
+                code = code.strip()
+                
+                if desc and code:
+                    parsed_list.append({
+                        'description': desc,
+                        'code': code
+                    })
+                else:
+                    parse_errors += 1
+            except Exception as e:
+                logger.warning(f"Failed to parse entry at index {i}: {e}")
+                parse_errors += 1
+        
+        if parse_errors > 0:
+            logger.warning(f"Encountered {parse_errors} parse errors while loading ICD list")
+        
+        if len(parsed_list) == 0:
+            raise PredictorDataError("No valid ICD entries found in file")
+        
+        logger.info(f"Loaded {len(parsed_list)} ICD codes from {icd_file}")
         return parsed_list
     
     def _load_counts(self) -> Dict:
-        """Load historical diagnosis counts."""
+        """Load historical diagnosis counts.
+        
+        Returns:
+            Dictionary of diagnosis counts, or empty dict if file doesn't exist
+        """
         counts_file = self.data_dir / 'counts.pickle'
+        
         if not counts_file.exists():
+            logger.warning(f"Counts file not found at {counts_file}, using empty counts")
             return {}
         
-        with open(counts_file, 'rb') as f:
-            return pickle.load(f)
+        try:
+            with open(counts_file, 'rb') as f:
+                counts = pickle.load(f)
+                logger.info(f"Loaded counts data with {len(counts)} entries")
+                return counts
+        except (pickle.UnpicklingError, EOFError) as e:
+            logger.error(f"Failed to unpickle counts file: {e}")
+            return {}
+        except Exception as e:
+            logger.error(f"Unexpected error loading counts: {e}")
+            return {}
     
     def _calculate_base_probability(self, patient: PatientDetails, code: str) -> float:
         """Calculate base probability from historical data."""
@@ -258,11 +438,28 @@ class EnhancedICDPredictor:
         
         Args:
             patient: Patient details
-            top_n: Number of top predictions to return
+            top_n: Number of top predictions to return (1-100)
             
         Returns:
             List of ICD predictions sorted by probability score
+            
+        Raises:
+            PatientValidationError: If patient data is invalid
+            ValueError: If top_n is out of range
         """
+        # Validate inputs
+        if not isinstance(patient, PatientDetails):
+            raise PatientValidationError("patient must be a PatientDetails instance")
+        
+        if not isinstance(top_n, int) or top_n < 1:
+            raise ValueError("top_n must be a positive integer")
+        
+        if top_n > 100:
+            logger.warning(f"top_n ({top_n}) exceeds maximum of 100, capping at 100")
+            top_n = 100
+        
+        logger.info(f"Predicting ICD codes for patient (age={patient.age}, sex={patient.sex}, symptoms={len(patient.symptoms)})")
+        
         all_symptoms = patient.symptoms + patient.primary_complaints
         predictions = []
         
